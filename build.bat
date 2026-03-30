@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
 
-python -m PyInstaller --clean --noconfirm --onefile --windowed --name UWONavi UWONavi.py
+python -m PyInstaller --clean --noconfirm --onefile --windowed --name UWONavi --icon=icon.ico UWONavi.py
 
 if errorlevel 1 (
     echo.
