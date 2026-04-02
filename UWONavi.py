@@ -25,6 +25,7 @@ import math
 import os
 import json
 import configparser
+import sys
 
 try:
     import win32gui
@@ -53,10 +54,11 @@ GAME_WINDOW_TITLE = "Uncharted Waters Online"
 SPRITE_W = 6
 SPRITE_H = 11
 
-# Coordinate display position as a fraction of the in-game resolution.
-# The right edge of the coordinate display, measured at 1600×1024.
-COORD_REL_RIGHT = 0.99250   # right edge x as fraction of res_x (1588/1600)
-COORD_REL_Y     = 0.73340   # top edge y as fraction of res_y  (751/1024, shifted 3px down)
+# Coordinate display placement within the game client.
+# Based on calibration across multiple resolutions, the OCR strip is anchored
+# to fixed client-edge margins rather than resolution-relative percentages.
+COORD_RIGHT_MARGIN  = 12    # capture strip right edge is 12px from client right
+COORD_BOTTOM_MARGIN = 273   # capture strip top edge is 273px above client bottom
 
 # Capture dimensions are fixed pixel sizes — always exactly 10 chars × 6px wide,
 # and SPRITE_H tall, regardless of resolution.
@@ -254,9 +256,7 @@ class DigitOCR:
 class GameWindow:
     """Locates GVO windows and manages locking to a specific instance."""
 
-    def __init__(self, res_x, res_y):
-        self.res_x       = res_x
-        self.res_y       = res_y
+    def __init__(self):
         self.locked_hwnd = None   # None = follow foreground, int = locked instance
 
     def find_all_gvo_windows(self):
@@ -302,15 +302,34 @@ class GameWindow:
             pass
         return None
 
-    def get_capture_region(self):
+    def get_client_size(self, hwnd):
+        """Return (client_width, client_height) for the target game window."""
+        if not WINDOWS or hwnd is None:
+            return None
+        try:
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            return right - left, bottom - top
+        except Exception:
+            return None
+
+    def get_capture_region(self, hwnd):
         """
         Return (client_x, client_y, width, height) of the coordinate display.
         Width and height are fixed pixel sizes (60×11).
-        X is derived from the right edge position; Y from the relative offset.
+        Placement is derived from fixed client-edge margins.
         """
-        right = int(self.res_x * COORD_REL_RIGHT)
+        size = self.get_client_size(hwnd)
+        if size is None:
+            return None
+
+        client_w, client_h = size
+        right = client_w - COORD_RIGHT_MARGIN
         x     = right - CAPTURE_W
-        y     = int(self.res_y * COORD_REL_Y)
+        y     = client_h - COORD_BOTTOM_MARGIN
+
+        if x < 0 or y < 0 or x + CAPTURE_W > client_w or y + CAPTURE_H > client_h:
+            return None
+
         return x, y, CAPTURE_W, CAPTURE_H
 
 
@@ -851,8 +870,6 @@ class UWONavi:
         # Load config
         cfg = load_config()
 
-        res_x      = cfg.getint    ("Window",    "resolutionx")
-        res_y      = cfg.getint    ("Window",    "resolutiony")
         map_file   = cfg.get       ("Map",       "file")
         hk_recen   = cfg.get       ("Hotkeys",   "recenter").lower()
         hk_clear   = cfg.get       ("Hotkeys",   "clear_track").lower()
@@ -878,7 +895,7 @@ class UWONavi:
         self.speed         = 0.0
         self.running       = False
 
-        self.game    = GameWindow(res_x, res_y)
+        self.game    = GameWindow()
         self.capture = ScreenCapture()
         self.ocr     = None
 
@@ -918,7 +935,6 @@ class UWONavi:
         threading.Thread(target=self._poll_loop, daemon=True).start()
         self._set_status(
             f"Running — {map_file}  |  "
-            f"res {res_x}×{res_y}  |  "
             f"[{hk_recen.upper()}] re-center  "
             f"[{hk_clear.upper()}] clear track  "
             f"[{hk_lock.upper()}] re-lock"
@@ -1086,7 +1102,13 @@ class UWONavi:
                 pass
             return
 
-        x, y, w, h = self.game.get_capture_region()
+        region = self.game.get_capture_region(hwnd)
+        if region is None:
+            self.root.after(0, self._set_status,
+                            "Unable to determine OCR capture region from game client size")
+            return
+
+        x, y, w, h = region
         img         = self.capture.capture(hwnd, x, y, w, h)
         result      = self.ocr.read_coordinates(img)
 
